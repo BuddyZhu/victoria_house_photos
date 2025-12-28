@@ -1,0 +1,16 @@
+[Unit]
+Description=Victoria House Photos Flask Application
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%WORKDIR%
+Environment="PATH=%WORKDIR%/venv/bin"
+ExecStart=%WORKDIR%/venv/bin/python %WORKDIR%/app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+

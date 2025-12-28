@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Victoria House Photos Map</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        #map {
+            width: 100%;
+            height: 100vh;
+        }
+        
+        
+        /* Custom popup styling */
+        .leaflet-popup-content-wrapper {
+            border-radius: 8px;
+            box-shadow: 0 3px 14px rgba(0,0,0,0.4);
+        }
+        
+        .leaflet-popup-content {
+            margin: 15px;
+            min-width: 200px;
+        }
+        
+        .popup-address {
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #2c3e50;
+        }
+        
+        .popup-link {
+            display: inline-block;
+            background: #3498db;
+            color: white;
+            padding: 8px 16px;
+            text-decoration: none;
+            border-radius: 4px;
+            transition: background 0.3s;
+        }
+        
+        .popup-link:hover {
+            background: #2980b9;
+        }
+        
+        .status-bar {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 10px 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            font-size: 14px;
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .clear-cache-btn {
+            background: #e74c3c;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.3s;
+        }
+        
+        .clear-cache-btn:hover {
+            background: #c0392b;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    
+    <div class="status-bar">
+        <span id="statusBar">Loading properties...</span>
+        <button class="clear-cache-btn" onclick="clearCacheAndReload()" title="Clear geocoding cache and retry">Clear Cache & Retry</button>
+    </div>
+    
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        // Initialize map centered on Victoria, BC
+        const map = L.map('map').setView([48.4284, -123.3656], 12);
+        
+        // Add OpenStreetMap tiles
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors',
+            maxZoom: 19
+        }).addTo(map);
+        
+        let markers = [];
+        let properties = [];
+        let geocodingCache = {};
+        let lastFileCount = 0;
+        
+        // Load geocoding cache from localStorage
+        function loadGeocodingCache() {
+            try {
+                const cached = localStorage.getItem('geocodingCache');
+                if (cached) {
+                    geocodingCache = JSON.parse(cached);
+                    console.log(`Loaded ${Object.keys(geocodingCache).length} cached geocoding results`);
+                }
+            } catch (e) {
+                console.warn('Failed to load geocoding cache:', e);
+            }
+        }
+        
+        // Save geocoding cache to localStorage
+        function saveGeocodingCache() {
+            try {
+                localStorage.setItem('geocodingCache', JSON.stringify(geocodingCache));
+            } catch (e) {
+                console.warn('Failed to save geocoding cache:', e);
+            }
+        }
+        
+        // Initialize cache on load
+        loadGeocodingCache();
+        
+        // Extract street address, removing unit number if present
+        function extractStreetAddress(fullStreet) {
+            // Pattern: "unit_number street_number street_name" (e.g., "11 4522 Gordon Point Dr")
+            // We want to keep only "street_number street_name" (e.g., "4522 Gordon Point Dr")
+            const unitPattern = /^(\d+)\s+(\d+\s+.+)$/;
+            const match = fullStreet.match(unitPattern);
+            
+            if (match) {
+                // Has unit number, return only street number + street name
+                return match[2];
+            }
+            // No unit number, return as is
+            return fullStreet;
+        }
+        
+        // Geocoding function using Nominatim (OpenStreetMap)
+        async function geocodeAddress(address) {
+            // Check cache first
+            if (geocodingCache[address]) {
+                return geocodingCache[address];
+            }
+            
+            // Parse address components
+            const parts = address.split(',').map(p => p.trim());
+            const fullStreet = parts[0] || '';
+            const city = parts[1] || '';
+            const province = parts[2] || '';
+            const postalCode = parts[3] || '';
+            
+            // Extract street address without unit number
+            const street = extractStreetAddress(fullStreet);
+            
+            // Reconstruct address without unit number
+            const addressWithoutUnit = [street, city, province, postalCode]
+                .filter(p => p)
+                .join(', ');
+            
+            // Try multiple search strategies
+            const searchQueries = [
+                // Street without unit + City + Victoria
+                street + ', ' + city + ', Victoria, BC, Canada',
+                // Street without unit + City + BC
+                street + ', ' + city + ', BC, Canada',
+                // Full address without unit + Victoria
+                addressWithoutUnit + ', Victoria, BC, Canada',
+                // Full address without unit + BC
+                addressWithoutUnit + ', BC, Canada',
+                // Just street without unit + Victoria
+                street + ', Victoria, BC, Canada',
+                // Original full address with Victoria (fallback)
+                address + ', Victoria, BC, Canada',
+                // Original full address with BC (fallback)
+                address + ', BC, Canada',
+                // Street + City only
+                street + ', ' + city + ', Canada'
+            ];
+            
+            for (let queryIndex = 0; queryIndex < searchQueries.length; queryIndex++) {
+                const query = searchQueries[queryIndex];
+                
+                try {
+                    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&countrycodes=ca`;
+                    const response = await fetch(url, {
+                        headers: {
+                            'User-Agent': 'VictoriaHousePhotos/1.0 (contact: localhost)'
+                        }
+                    });
+                    
+                    // Check for rate limiting
+                    if (response.status === 429) {
+                        console.warn('Rate limited, waiting longer...');
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        // Retry once
+                        const retryResponse = await fetch(url, {
+                            headers: {
+                                'User-Agent': 'VictoriaHousePhotos/1.0 (contact: localhost)'
+                            }
+                        });
+                        if (!retryResponse.ok) {
+                            continue; // Try next query
+                        }
+                        const retryData = await retryResponse.json();
+                        if (retryData && retryData.length > 0) {
+                            const result = {
+                                lat: parseFloat(retryData[0].lat),
+                                lon: parseFloat(retryData[0].lon)
+                            };
+                            geocodingCache[address] = result;
+                            saveGeocodingCache();
+                            console.log('Geocoded:', address, '->', result, `(query ${queryIndex + 1})`);
+                            return result;
+                        }
+                        continue; // Try next query
+                    }
+                    
+                    if (!response.ok) {
+                        continue; // Try next query
+                    }
+                    
+                    const data = await response.json();
+                    
+                    if (data && data.length > 0) {
+                        const result = {
+                            lat: parseFloat(data[0].lat),
+                            lon: parseFloat(data[0].lon)
+                        };
+                        geocodingCache[address] = result;
+                        saveGeocodingCache();
+                        console.log('Geocoded:', address, '->', result, `(query ${queryIndex + 1})`);
+                        return result;
+                    }
+                } catch (error) {
+                    // Try next query on error
+                    continue;
+                }
+            }
+            
+            // All queries failed
+            console.warn('No results for address after trying multiple queries:', address);
+            return null;
+        }
+        
+        // Load properties from API
+        async function loadProperties() {
+            try {
+                const response = await fetch('/api/properties');
+                if (!response.ok) {
+                    throw new Error('Failed to load properties');
+                }
+                
+                const data = await response.json();
+                const currentFileCount = data.length;
+                
+                // Only reload if file count changed
+                if (currentFileCount !== lastFileCount) {
+                    lastFileCount = currentFileCount;
+                    properties = data;
+                    await updateMap();
+                }
+                
+                updateStatus(`Loaded ${currentFileCount} properties`);
+            } catch (error) {
+                console.error('Error loading properties:', error);
+                updateStatus('Error loading properties');
+            }
+        }
+        
+        // Update map with markers
+        async function updateMap() {
+            // Clear existing markers
+            markers.forEach(marker => map.removeLayer(marker));
+            markers = [];
+            
+            // Group properties by address to handle duplicates
+            const addressGroups = {};
+            properties.forEach(property => {
+                if (!addressGroups[property.address]) {
+                    addressGroups[property.address] = [];
+                }
+                addressGroups[property.address].push(property);
+            });
+            
+            const uniqueAddresses = Object.keys(addressGroups);
+            updateStatus(`Geocoding ${uniqueAddresses.length} unique addresses...`);
+            
+            let geocodedCount = 0;
+            
+            // Geocode and add markers
+            // Add delay between requests to respect Nominatim rate limits (1 request per second)
+            console.log(`Starting to geocode ${uniqueAddresses.length} unique addresses (${properties.length} total files)...`);
+            
+            for (let i = 0; i < uniqueAddresses.length; i++) {
+                const address = uniqueAddresses[i];
+                const addressProperties = addressGroups[address];
+                
+                // Add delay between requests (except for the first one)
+                // Nominatim allows 1 request per second, but we'll use 1.1 seconds to be safe
+                if (i > 0) {
+                    await new Promise(resolve => setTimeout(resolve, 1100));
+                }
+                
+                const coords = await geocodeAddress(address);
+                
+                if (coords) {
+                    // Create popup with all files for this address
+                    let popupContent = `<div class="popup-address">${address}</div>`;
+                    
+                    if (addressProperties.length === 1) {
+                        // Single file
+                        popupContent += `<a href="#" class="popup-link" onclick="showDetail('${addressProperties[0].filename.replace(/'/g, "\\'")}', '${address.replace(/'/g, "\\'")}'); return false;">View Details</a>`;
+                    } else {
+                        // Multiple files for same address
+                        popupContent += `<div style="margin-top: 10px;">${addressProperties.length} listings:</div>`;
+                        addressProperties.forEach((prop, idx) => {
+                            popupContent += `<a href="#" class="popup-link" style="display: block; margin-top: 5px;" onclick="showDetail('${prop.filename.replace(/'/g, "\\'")}', '${address.replace(/'/g, "\\'")}'); return false;">Listing ${idx + 1}</a>`;
+                        });
+                    }
+                    
+                    const marker = L.marker([coords.lat, coords.lon])
+                        .addTo(map)
+                        .bindPopup(popupContent);
+                    
+                    markers.push(marker);
+                    geocodedCount++;
+                    console.log(`Added marker ${geocodedCount} for ${address} (${addressProperties.length} file(s))`);
+                } else {
+                    console.warn(`Failed to geocode: ${address}`);
+                }
+                
+                // Update status periodically
+                if ((i + 1) % 5 === 0 || i === uniqueAddresses.length - 1) {
+                    updateStatus(`Geocoded ${i + 1}/${uniqueAddresses.length} addresses... (${geocodedCount} successful)`);
+                }
+            }
+            
+            console.log(`Geocoding complete: ${geocodedCount}/${uniqueAddresses.length} addresses geocoded successfully`);
+            updateStatus(`Map updated: ${geocodedCount} properties displayed`);
+            
+            // Fit map to show all markers if we have any
+            if (markers.length > 0) {
+                const group = new L.featureGroup(markers);
+                map.fitBounds(group.getBounds().pad(0.1));
+            }
+        }
+        
+        // Show detail view - navigate directly to extracted HTML
+        function showDetail(filename, address) {
+            // Navigate directly to the mhtml endpoint
+            // Backend extracts HTML from mhtml and serves it
+            // Browser back button will return to map
+            const fileUrl = `/mhtml/${encodeURIComponent(filename)}`;
+            window.location.href = fileUrl;
+        }
+        
+        // Update status bar
+        function updateStatus(message) {
+            const statusBar = document.getElementById('statusBar');
+            statusBar.textContent = message;
+        }
+        
+        // Clear cache and reload
+        function clearCacheAndReload() {
+            if (confirm('Clear geocoding cache and retry? This will re-geocode all addresses.')) {
+                geocodingCache = {};
+                localStorage.removeItem('geocodingCache');
+                console.log('Cache cleared, reloading map...');
+                loadProperties();
+            }
+        }
+        
+        // Auto-refresh every 30 seconds to check for new files
+        setInterval(loadProperties, 30000);
+        
+        // Initial load
+        loadProperties();
+    </script>
+</body>
+</html>
+
