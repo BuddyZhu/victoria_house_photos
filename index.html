@@ -142,32 +142,44 @@
         
         // Extract street address, removing unit number if present
         function extractStreetAddress(fullStreet) {
-            // Pattern: "unit_number street_number street_name" (e.g., "11 4522 Gordon Point Dr")
-            // We want to keep only "street_number street_name" (e.g., "4522 Gordon Point Dr")
-            const unitPattern = /^(\d+)\s+(\d+\s+.+)$/;
-            const match = fullStreet.match(unitPattern);
+            // Pattern: "unit_number street_number street_name" (e.g., "124 2345 Cedar Hill Cross Rd")
+            // We want to keep only "street_number street_name" (e.g., "2345 Cedar Hill Cross Rd")
+            // Match: start with digits (unit), space(s), then digits (street number), space(s), then rest
+            const trimmed = fullStreet.trim();
+            // Pattern matches: unit (1-4 digits typically) followed by space(s) and then street number
+            const unitPattern = /^(\d{1,4})\s+(\d+\s+.+)$/;
+            const match = trimmed.match(unitPattern);
             
             if (match) {
                 // Has unit number, return only street number + street name
-                return match[2];
+                const streetOnly = match[2].trim();
+                console.log(`Extracted unit number: "${match[1]}" from "${trimmed}" -> "${streetOnly}"`);
+                return streetOnly;
             }
             // No unit number, return as is
-            return fullStreet;
+            console.log(`No unit number detected in: "${trimmed}"`);
+            return trimmed;
         }
         
         // Geocoding function using Nominatim (OpenStreetMap)
         async function geocodeAddress(address) {
-            // Check cache first
-            if (geocodingCache[address]) {
-                return geocodingCache[address];
-            }
-            
-            // Parse address components
+            // Parse address components first to check for unit number
             const parts = address.split(',').map(p => p.trim());
             const fullStreet = parts[0] || '';
             const city = parts[1] || '';
-            const province = parts[2] || '';
-            const postalCode = parts[3] || '';
+            let province = parts[2] || '';
+            let postalCode = parts[3] || '';
+            
+            // Extract postal code from province if it's combined (e.g., "British Columbia V8N6L4")
+            // Canadian postal codes are 6 characters: letter-number-letter number-letter-number
+            const postalCodePattern = /\b([A-Z]\d[A-Z]\s?\d[A-Z]\d)\b/i;
+            if (!postalCode && province) {
+                const postalMatch = province.match(postalCodePattern);
+                if (postalMatch) {
+                    postalCode = postalMatch[1].replace(/\s/g, ''); // Remove spaces from postal code
+                    province = province.replace(postalCodePattern, '').trim(); // Remove postal code from province
+                }
+            }
             
             // Extract street address without unit number
             const street = extractStreetAddress(fullStreet);
@@ -177,25 +189,70 @@
                 .filter(p => p)
                 .join(', ');
             
+            // Check cache - prefer address without unit number if unit was detected
+            const hasUnitNumber = street !== fullStreet.trim();
+            if (hasUnitNumber) {
+                // Unit number detected - only use cache for address without unit (never use cached full address)
+                if (geocodingCache[addressWithoutUnit]) {
+                    console.log(`✓ CACHE HIT: Using cached result for address without unit: "${addressWithoutUnit}"`);
+                    console.log(`  Cached coordinates:`, geocodingCache[addressWithoutUnit]);
+                    // Cache the result for the full address too (for future lookups)
+                    geocodingCache[address] = geocodingCache[addressWithoutUnit];
+                    saveGeocodingCache();
+                    return geocodingCache[addressWithoutUnit];
+                }
+                // No cache for address without unit - will geocode below
+                console.log(`✗ CACHE MISS: Unit number detected but no cache for "${addressWithoutUnit}", will geocode`);
+            } else {
+                // No unit number detected - check cache for full address
+                if (geocodingCache[address]) {
+                    console.log(`✓ CACHE HIT: Using cached result for address: "${address}"`);
+                    console.log(`  Cached coordinates:`, geocodingCache[address]);
+                    return geocodingCache[address];
+                }
+                console.log(`✗ CACHE MISS: No cache for "${address}", will geocode`);
+            }
+            
             // Try multiple search strategies
+            // Build address components without postal code for better geocoding
+            const addressWithoutPostalCode = [street, city, province]
+                .filter(p => p)
+                .join(', ');
+            
             const searchQueries = [
-                // Street without unit + City + Victoria
+                // Street without unit + City + Victoria (most reliable)
                 street + ', ' + city + ', Victoria, BC, Canada',
                 // Street without unit + City + BC
                 street + ', ' + city + ', BC, Canada',
-                // Full address without unit + Victoria
-                addressWithoutUnit + ', Victoria, BC, Canada',
-                // Full address without unit + BC
+                // Address without unit/postal + Victoria
+                addressWithoutPostalCode + ', Victoria, BC, Canada',
+                // Address without unit/postal + BC
+                addressWithoutPostalCode + ', BC, Canada',
+                // Full address without unit (with postal code)
                 addressWithoutUnit + ', BC, Canada',
                 // Just street without unit + Victoria
                 street + ', Victoria, BC, Canada',
-                // Original full address with Victoria (fallback)
-                address + ', Victoria, BC, Canada',
-                // Original full address with BC (fallback)
-                address + ', BC, Canada',
                 // Street + City only
-                street + ', ' + city + ', Canada'
+                street + ', ' + city + ', Canada',
+                // Street + City + Postal code (if available)
+                ...(postalCode ? [street + ', ' + city + ', ' + postalCode + ', BC, Canada'] : [])
             ];
+            
+            // Only add full address queries if no unit number was detected
+            if (!hasUnitNumber) {
+                searchQueries.push(
+                    // Original full address with Victoria (fallback)
+                    address + ', Victoria, BC, Canada',
+                    // Original full address with BC (fallback)
+                    address + ', BC, Canada'
+                );
+            }
+            
+            console.log(`Geocoding ${hasUnitNumber ? 'address without unit' : 'full address'}: "${hasUnitNumber ? addressWithoutUnit : address}"`);
+            console.log(`Search queries (${searchQueries.length} total):`, searchQueries.slice(0, 3));
+            if (searchQueries.length > 3) {
+                console.log(`  ... and ${searchQueries.length - 3} more queries`);
+            }
             
             for (let queryIndex = 0; queryIndex < searchQueries.length; queryIndex++) {
                 const query = searchQueries[queryIndex];
@@ -227,7 +284,12 @@
                                 lat: parseFloat(retryData[0].lat),
                                 lon: parseFloat(retryData[0].lon)
                             };
+                            // Cache for the full address
                             geocodingCache[address] = result;
+                            // If unit number was detected, also cache for address without unit
+                            if (hasUnitNumber && addressWithoutUnit !== address) {
+                                geocodingCache[addressWithoutUnit] = result;
+                            }
                             saveGeocodingCache();
                             console.log('Geocoded:', address, '->', result, `(query ${queryIndex + 1})`);
                             return result;
@@ -246,7 +308,12 @@
                             lat: parseFloat(data[0].lat),
                             lon: parseFloat(data[0].lon)
                         };
+                        // Cache for the full address
                         geocodingCache[address] = result;
+                        // If unit number was detected, also cache for address without unit
+                        if (hasUnitNumber && addressWithoutUnit !== address) {
+                            geocodingCache[addressWithoutUnit] = result;
+                        }
                         saveGeocodingCache();
                         console.log('Geocoded:', address, '->', result, `(query ${queryIndex + 1})`);
                         return result;
@@ -372,7 +439,8 @@
                 const coords = await geocodeAddress(address);
                 
                 if (coords) {
-                    const marker = createMarker(address, addressProperties, coords);
+                    // Add marker immediately (one by one)
+                    const marker = createMarker(address, addressProperties, coords, true);
                     markers.push(marker);
                     uncachedGeocoded++;
                     
