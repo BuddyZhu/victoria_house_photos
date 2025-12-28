@@ -12,12 +12,18 @@ from email import policy
 from flask import Flask, send_file, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from pathlib import Path
+from time import time
 
 app = Flask(__name__)
 CORS(app)
 
 # Base directory for mhtml files
 BASE_DIR = Path(__file__).parent
+
+# Cache for properties list (to avoid rescanning on every request)
+_properties_cache = None
+_cache_timestamp = 0
+CACHE_DURATION = 5  # Cache for 5 seconds
 
 
 def extract_address_from_filename(filename):
@@ -66,9 +72,17 @@ def get_properties():
     """
     API endpoint to get all properties with addresses.
     Returns JSON array of properties.
+    Uses caching to avoid rescanning files on every request.
     """
-    properties = scan_mhtml_files()
-    return jsonify(properties)
+    global _properties_cache, _cache_timestamp
+    
+    current_time = time()
+    # Refresh cache if it's expired or doesn't exist
+    if _properties_cache is None or (current_time - _cache_timestamp) > CACHE_DURATION:
+        _properties_cache = scan_mhtml_files()
+        _cache_timestamp = current_time
+    
+    return jsonify(_properties_cache)
 
 
 def extract_html_from_mhtml(file_path):

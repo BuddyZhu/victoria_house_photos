@@ -287,7 +287,30 @@
             }
         }
         
-        // Update map with markers
+        // Helper function to create marker for an address
+        function createMarker(address, addressProperties, coords) {
+            // Create popup with all files for this address
+            let popupContent = `<div class="popup-address">${address}</div>`;
+            
+            if (addressProperties.length === 1) {
+                // Single file
+                popupContent += `<a href="#" class="popup-link" onclick="showDetail('${addressProperties[0].filename.replace(/'/g, "\\'")}', '${address.replace(/'/g, "\\'")}'); return false;">View Details</a>`;
+            } else {
+                // Multiple files for same address
+                popupContent += `<div style="margin-top: 10px;">${addressProperties.length} listings:</div>`;
+                addressProperties.forEach((prop, idx) => {
+                    popupContent += `<a href="#" class="popup-link" style="display: block; margin-top: 5px;" onclick="showDetail('${prop.filename.replace(/'/g, "\\'")}', '${address.replace(/'/g, "\\'")}'); return false;">Listing ${idx + 1}</a>`;
+                });
+            }
+            
+            const marker = L.marker([coords.lat, coords.lon])
+                .addTo(map)
+                .bindPopup(popupContent);
+            
+            return marker;
+        }
+        
+        // Update map with markers - optimized version
         async function updateMap() {
             // Clear existing markers
             markers.forEach(marker => map.removeLayer(marker));
@@ -303,16 +326,41 @@
             });
             
             const uniqueAddresses = Object.keys(addressGroups);
-            updateStatus(`Geocoding ${uniqueAddresses.length} unique addresses...`);
             
+            // Separate cached and uncached addresses
+            const cachedAddresses = [];
+            const uncachedAddresses = [];
+            
+            uniqueAddresses.forEach(address => {
+                if (geocodingCache[address]) {
+                    cachedAddresses.push(address);
+                } else {
+                    uncachedAddresses.push(address);
+                }
+            });
+            
+            console.log(`Found ${cachedAddresses.length} cached addresses, ${uncachedAddresses.length} need geocoding`);
+            updateStatus(`Loading ${cachedAddresses.length} cached markers, geocoding ${uncachedAddresses.length} addresses...`);
+            
+            // Add all cached markers immediately (no delay needed)
             let geocodedCount = 0;
             
-            // Geocode and add markers
-            // Add delay between requests to respect Nominatim rate limits (1 request per second)
-            console.log(`Starting to geocode ${uniqueAddresses.length} unique addresses (${properties.length} total files)...`);
+            cachedAddresses.forEach(address => {
+                const coords = geocodingCache[address];
+                const addressProperties = addressGroups[address];
+                const marker = createMarker(address, addressProperties, coords);
+                markers.push(marker);
+                geocodedCount++;
+            });
             
-            for (let i = 0; i < uniqueAddresses.length; i++) {
-                const address = uniqueAddresses[i];
+            console.log(`Added ${cachedAddresses.length} cached markers immediately`);
+            
+            // Now geocode uncached addresses with rate limiting
+            let uncachedGeocoded = 0;
+            const STATUS_UPDATE_INTERVAL = 5; // Update status every 5 addresses
+            
+            for (let i = 0; i < uncachedAddresses.length; i++) {
+                const address = uncachedAddresses[i];
                 const addressProperties = addressGroups[address];
                 
                 // Add delay between requests (except for the first one)
@@ -324,39 +372,21 @@
                 const coords = await geocodeAddress(address);
                 
                 if (coords) {
-                    // Create popup with all files for this address
-                    let popupContent = `<div class="popup-address">${address}</div>`;
-                    
-                    if (addressProperties.length === 1) {
-                        // Single file
-                        popupContent += `<a href="#" class="popup-link" onclick="showDetail('${addressProperties[0].filename.replace(/'/g, "\\'")}', '${address.replace(/'/g, "\\'")}'); return false;">View Details</a>`;
-                    } else {
-                        // Multiple files for same address
-                        popupContent += `<div style="margin-top: 10px;">${addressProperties.length} listings:</div>`;
-                        addressProperties.forEach((prop, idx) => {
-                            popupContent += `<a href="#" class="popup-link" style="display: block; margin-top: 5px;" onclick="showDetail('${prop.filename.replace(/'/g, "\\'")}', '${address.replace(/'/g, "\\'")}'); return false;">Listing ${idx + 1}</a>`;
-                        });
-                    }
-                    
-                    const marker = L.marker([coords.lat, coords.lon])
-                        .addTo(map)
-                        .bindPopup(popupContent);
-                    
+                    const marker = createMarker(address, addressProperties, coords);
                     markers.push(marker);
-                    geocodedCount++;
-                    console.log(`Added marker ${geocodedCount} for ${address} (${addressProperties.length} file(s))`);
+                    uncachedGeocoded++;
+                    
+                    // Update status periodically
+                    if ((i + 1) % STATUS_UPDATE_INTERVAL === 0 || i === uncachedAddresses.length - 1) {
+                        updateStatus(`Geocoded ${i + 1}/${uncachedAddresses.length} new addresses... (${geocodedCount + uncachedGeocoded} total markers)`);
+                    }
                 } else {
                     console.warn(`Failed to geocode: ${address}`);
                 }
-                
-                // Update status periodically
-                if ((i + 1) % 5 === 0 || i === uniqueAddresses.length - 1) {
-                    updateStatus(`Geocoded ${i + 1}/${uniqueAddresses.length} addresses... (${geocodedCount} successful)`);
-                }
             }
             
-            console.log(`Geocoding complete: ${geocodedCount}/${uniqueAddresses.length} addresses geocoded successfully`);
-            updateStatus(`Map updated: ${geocodedCount} properties displayed`);
+            console.log(`Geocoding complete: ${geocodedCount + uncachedGeocoded}/${uniqueAddresses.length} addresses displayed`);
+            updateStatus(`Map updated: ${geocodedCount + uncachedGeocoded} properties displayed`);
             
             // Fit map to show all markers if we have any
             if (markers.length > 0) {
